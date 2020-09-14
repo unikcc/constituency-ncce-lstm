@@ -357,21 +357,11 @@ class Preprocessor:
         for document, document_char, source_label, source_pos in tqdm(zip(documents, document_chars, source_labels, part_of_speeches), total=len(documents)):
             sentence_ids, sentence_id_chars, sentence_masks, sentence_segments, sentence_labels, sentence_poses = [], [], [], [], [], []
             # 句子数，单词数 ,义原数
-            sentence_sememes, sentence_sememes_nums = [], []
             global_max = 10
             tmp = [[w for line in document for w in line][:self.max_length - 2]]
-            if self.args.doc == 'doc':
-                self.max_length = 512
-                indexs = self.get_sentence_index(document, self.max_length - 2)
-                document = [[w for j in index for w in document[j]] for index in indexs]
-                document_char = [[w for j in index for w in document_char[j]] for index in indexs]
-                source_label = [[w for j in index for w in source_label[j]] for index in indexs]
-                source_pos = [[w for j in index for w in source_pos[j]] for index in indexs]
-            sentence_adj, sentence_sememes = self.get_sememe_adj(document)
             sentence_lengths = []
-                
+
             for sentence, sentence_char, s_label, s_pos in zip(document, document_char, source_label, source_pos):
-                sememe, sememe_num = self.get_sememe_and_num(sentence, 0)
                 input_pos = [w for w in s_pos]
                 input_pos = [self.pos_dict[w if w in self.pos_dict else '[UNK]'] for w in input_pos]
 
@@ -382,24 +372,29 @@ class Preprocessor:
                                   for w in line] for line in sentence_char]
                 input_label = [label_dict[w] for w in s_label]
 
+                padding = [0] * (self.max_length - len(input_id))
+
+                input_id += padding
+                input_label += padding
+                input_pos += padding
+                assert len(input_id) == self.max_length
+                assert len(input_label) == self.max_length
+                assert len(input_pos) == self.max_length
+
                 sentence_ids.append(input_id)
                 sentence_id_chars.append(input_id_char)
                 sentence_labels.append(input_label)
                 sentence_poses.append(input_pos)
-                #sentence_sememes.append(sememe)
-                sentence_sememes_nums.append(sememe_num)
 
             input_ids.append(sentence_ids)
             input_id_chars.append(sentence_id_chars)
             input_lengths.append(sentence_lengths)
             input_labels.append(sentence_labels)
             input_poses.append(sentence_poses)
-            input_sememes.append(sentence_sememes)
-            input_adjs.append(sentence_adj)
-            input_sememes_nums.append(sentence_adj)
         path = open(os.path.join(self.data_dir, '{}.pkl'.format(mode)), 'wb')
         #pkl.dump((input_ids, input_masks, input_segments, input_labels, mention_set, input_poses, input_sememes, input_sememes_nums), path)
-        pkl.dump((input_ids, input_id_chars, input_lengths, input_labels, mention_set, input_poses, input_sememes, input_sememes_nums), path)
+        pkl.dump((input_ids, input_lengths, input_labels, mention_set, input_poses), path)
+        # pkl.dump((input_ids, input_id_chars, input_lengths, input_labels, mention_set, input_poses, input_sememes, input_sememes_nums), path)
 
     def manage(self):
         modes = ['train', 'test', 'valid']
