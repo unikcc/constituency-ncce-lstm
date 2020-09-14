@@ -349,8 +349,6 @@ class Preprocessor:
     def transform2indices(self, data, mode='train'):
         documents, document_chars, source_labels, mention_set, part_of_speeches = data
         input_ids, input_id_chars, input_masks, input_segments, input_labels, input_poses = [], [], [], [], [], []
-        input_sememes, input_sememes_nums= [], []
-        input_adjs = []
         input_lengths = []
         label_dict = {'B':0, 'I':1, 'O':2}
         print("start... {}".format(mode))
@@ -392,7 +390,6 @@ class Preprocessor:
             input_labels.append(sentence_labels)
             input_poses.append(sentence_poses)
         path = open(os.path.join(self.data_dir, '{}.pkl'.format(mode)), 'wb')
-        #pkl.dump((input_ids, input_masks, input_segments, input_labels, mention_set, input_poses, input_sememes, input_sememes_nums), path)
         pkl.dump((input_ids, input_lengths, input_labels, mention_set, input_poses), path)
         # pkl.dump((input_ids, input_id_chars, input_lengths, input_labels, mention_set, input_poses, input_sememes, input_sememes_nums), path)
 
@@ -411,7 +408,6 @@ class Preprocessor:
         self.build_embedding(self.word_dict,self.embedding_path)
 
         print("Start transforme to indices")
-        self.get_sememe()
 
         self.transform2indices(train_data)
         self.transform2indices(test_data, 'test')
