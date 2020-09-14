@@ -377,7 +377,6 @@ class Preprocessor:
                 input_pos += padding
                 assert len(input_id) == self.max_length
                 assert len(input_label) == self.max_length
-                assert len(input_pos) == self.max_length
 
                 sentence_ids.append(input_id)
                 sentence_id_chars.append(input_id_char)
@@ -405,7 +404,7 @@ class Preprocessor:
 
         self.build_dict(train_data, test_data, valid_data)
         print("start building embedding")
-        self.build_embedding(self.word_dict,self.embedding_path)
+        #self.build_embedding(self.word_dict,self.embedding_path)
 
         print("Start transforme to indices")
 
