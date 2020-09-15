@@ -85,7 +85,7 @@ class Pipeline:
             else:
                 with torch.no_grad():
                     loss, correct_count, count, bio_p, bio_g, doc_len = self.model(input_ids, input_lengths, input_labels,
-                                                                          mention_sets, sentence_counts, reverse_sort,
+                                                                          mention_sets, sentence_counts, reverse_orders,
                                                                           False, coref_evaluator)
             bio_predict.append(bio_p)
             bio_gold.append(bio_g)
