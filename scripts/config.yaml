@@ -7,7 +7,7 @@ CLS: "[CLS]"
 SEP: "[SEP]"
 PAD: "[PAD]"
 UNK: "[UNK]"
-batch_size: 1
+batch_size: 16
 max_length: 512
 learning_rate: 0.003
 patience: 10 

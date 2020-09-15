@@ -395,7 +395,7 @@ class myLSTM(nn.Module):
         input_lengths = input_lengths[reverse_sort]
 
         output = self.dropout(output)
-        criterion = nn.CrossEntropyLoss(reduction='none')
+        criterion = nn.CrossEntropyLoss(weight=torch.tensor([5, 3, 1.0]).to(self.device), reduction='none')
         output = self.linear_1(output)
         dense_input, dense_labels, document_lengths, dense_mask, batch_idx = self.get_dense_mention(output,
                                                                                                     sentence_counts,
