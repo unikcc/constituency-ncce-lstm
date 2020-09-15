@@ -26,63 +26,20 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
 
 class MyDataset(Dataset):
     def __init__(self, data):
-        #self.documents, self.labels, self.mention_set = data
-        self.input_ids, self.input_id_chars, self.input_lengths, self.input_labels, self.mention_set, self.input_poses, self.input_sememes, self.input_sememes_nums = data
+        self.input_ids, self.input_lengths, self.input_labels, self.mention_set, _ = data
 
-        res, res_chars, lengths, reverse_order, mention_set = [], [], [], [], []
-        labels = []
-        for i, document in enumerate(self.input_ids):
-            tmp = self.padding(document, i)
-            res.append(tmp[0])
-            res_chars.append(tmp[1])
-            lengths.append(tmp[2])
-            reverse_order.append(tmp[3])
-            labels.append(tmp[4])
-
-        self.input_ids = res
-        self.input_id_chars = res_chars
-        self.input_lengths = lengths
-        self.reverse_orders = reverse_order
-        self.input_labels = labels
-
-    def padding(self, document, i):
-        lengths  = list(map(len, document))
-
-        max_seq_length = max(lengths)
-        max_char_len = 10
-
-        argsort = np.argsort(lengths)[::-1]
-
-        document  = [document[w] for w in argsort]
-        lengths = [lengths[w] for w in argsort]
-        document = [w + [0 for _ in range(max_seq_length - len(w))] for w in document]
-        labels = [w + [0 for _ in range(max_seq_length - len(w))] for w in self.input_labels[i]]
-        document_char = [[word + [0 for _ in range(max_char_len - len(word))] for word in sent] for sent in self.input_id_chars[i]]
-        document_char = [[word[:max_char_len] for word in sent] for sent in document_char]
-        document_char = [sent + [[0 for ii in range(max_char_len)] for _ in range(max_seq_length - len(sent))] for sent in document_char]
-
-        reverse_order = np.argsort(argsort)
-        return document, document_char, lengths, reverse_order, labels
+    def __getitem__(self, index):
+        assert len(self.mention_set[index]) > 0
+        res = {
+            "input_ids": torch.tensor(self.input_ids[index]),
+            "input_lengths": torch.tensor(self.input_lengths[index]),
+            "input_labels": torch.tensor(self.input_labels[index]),
+            "mention_sets": self.mention_set[index],
+        }
+        return res
 
     def __len__(self):
         return len(self.input_ids)
-
-    def __getitem__(self, index):
-        # pkl.dump((ids, segment_ids, input_masks, label_ids, location_ids), open(path, 'wb'))
-        #input_segment = self.input_segments[index]
-        #argsort, new_length = self.get_sort(input_segment)
-
-        res=  {
-            'input_ids': torch.tensor(self.input_ids[index]),
-            'input_id_chars': torch.tensor(self.input_id_chars[index]),
-            'input_labels': torch.tensor(self.input_labels[index]),
-            'input_lengths': torch.tensor(self.input_lengths[index]),
-            'mention_sets': self.mention_set[index],
-            'reverse_orders': torch.tensor(self.reverse_orders[index]),
-            'input_sememes': torch.tensor(self.input_sememes[index]),
-            "input_sememes_nums": sparse_mx_to_torch_sparse_tensor(self.input_sememes_nums[index])
-        }
-        return res
 
 
 class MyDataLoader:
@@ -92,8 +49,32 @@ class MyDataLoader:
         path = os.path.join(args.data_dir, '{}.pkl'.format(mode))
         self.data = pkl.load(open(path, 'rb'))
 
+    def collate_fn(self, batch_data):
+        #input_ids = batch_data['input_ids']
+        sentence_counts = torch.tensor([document['input_ids'].shape[0] for document in batch_data])
+        input_ids = torch.stack([w for line in batch_data for w in line['input_ids']])
+        input_lengths = torch.stack([w for line in batch_data for w in line['input_lengths']])
+        input_labels = torch.stack([w for line in batch_data for w in line['input_labels']])
+        mention_set = [w['mention_sets'] for w in batch_data]
+
+        argsort = torch.argsort(input_lengths, descending=True)
+        reverse_orders = argsort.argsort()
+        input_ids = input_ids[argsort]
+        input_lengths = input_lengths[argsort]
+        res = {
+            'input_ids': input_ids,
+            'input_lengths': input_lengths,
+            'input_labels': input_labels,
+            'reverse_orders': reverse_orders,
+            'mention_sets': mention_set,
+            'sentence_counts': sentence_counts
+        }
+        return res
+
+
     def getdata(self):
-        return DataLoader(MyDataset(self.data), shuffle=False, batch_size=self.args.batch_size)
+        return DataLoader(MyDataset(self.data), shuffle=False, batch_size=self.args.batch_size, collate_fn=self.collate_fn)
+
 
 def get_indices(bios):
     res = []

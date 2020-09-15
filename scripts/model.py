@@ -9,39 +9,31 @@ from utils import get_mention_f1
 from getCluster import get_cluster
 from utils import evaluate_coref
 from metrics_back import CorefEvaluator
-from AntNRE.src.word_encoder import WordCharEncoder
-from AntNRE.src.seq_encoder import BiLSTMEncoder
 
-#from pytorch_pretrained_bert.modeling import BertModel, BertPreTrainedModel
+# from pytorch_pretrained_bert.modeling import BertModel, BertPreTrainedModel
 from pytorch_transformers.modeling_bert import BertModel, BertPreTrainedModel, BertConfig
 from pytorch_transformers import BertTokenizer
+
 
 class myLSTM(nn.Module):
     """
     My lstm for text classification
     """
-    def __init__(self, config, device):
-        # super(myClassification, self).__init__(config)
-        super(myLSTM, self).__init__()
-        self.dict = config.word_dict
-        # self.bert = BertModel(config, output_attentions=False, keep_multihead_output=False)
-        self.bert = BertModel(config)
-        #self.tokenizer = BertTokenizer.from_pretrained('/usr/local/bert/bert-base-chinese')
-        config.hidden_size = config.embedding_size
-        self.embedding = nn.Embedding(config.vocab_size, config.embedding_size)
-        self.embedding.weight.data.copy_(torch.from_numpy(config.embedding))
-        #self.embedding.weight.requires_grad = False
 
-        self.tokenizer = BertTokenizer.from_pretrained(config.bert_path)
+    def __init__(self, config, device):
+        super(myLSTM, self).__init__()
         self.device = device
         self.hidden_size = config.hidden_size
         self.output_size = config.num_labels
         self.dropout = nn.Dropout(0.2)
-        #self.pos_lstm = nn.LSTM()
+        # self.pos_lstm = nn.LSTM()
+        self.word_dict = config.word_dict
 
         hidden_size = self.hidden_size
-        output_size = self.output_size
-        self.lstm = nn.LSTM(self.hidden_size, self.hidden_size, bidirectional=True, batch_first=True, num_layers=2)
+        output_size = self.output_size + 1
+        self.embedding = nn.Embedding(config.vocab_size, config.embedding_size)
+        self.embedding.weight.data.copy_(torch.from_numpy(config.embedding_matrix))
+        self.lstm = nn.LSTM(config.embedding_size, self.hidden_size, bidirectional=True, batch_first=True)
         self.lin = nn.Linear(hidden_size * 2, hidden_size)
 
         self.out = nn.Sequential(
@@ -55,35 +47,25 @@ class myLSTM(nn.Module):
             nn.Linear(hidden_size, 1),
         )
         hidden_size_low = 100
-        
-        #self.mention_linear = nn.Linear(hidden_size * 2, output_size + 1)
+
+        # self.mention_linear = nn.Linear(hidden_size * 2, output_size + 1)
         self.mention_linear = nn.Sequential(
-            nn.Linear( hidden_size_low+ config.pos_emb_size * 2 + config.sememe_emb_size * 2, hidden_size),
+            nn.Linear(hidden_size_low + config.pos_emb_size * 2 + config.sememe_emb_size * 2, hidden_size),
             nn.Tanh(),
             nn.Dropout(0.2),
             nn.Linear(hidden_size, output_size)
         )
         self.mention_linear_no_pos = nn.Sequential(
-            nn.Linear(hidden_size//2, hidden_size_low),
+            nn.Linear(hidden_size_low, hidden_size_low),
             nn.Tanh(),
             nn.Dropout(0.2),
             nn.Linear(hidden_size_low, output_size)
         )
-        
-        
-        self.linear = nn.Linear(hidden_size * 2, output_size - 1)
-        self.linear_1 = nn.Linear(hidden_size * 2, hidden_size // 2)
-        self.part_of_speech_embedding = nn.Embedding(config.num_pos, config.pos_emb_size)
-        self.pos_lstm = nn.LSTM(config.pos_emb_size, config.pos_emb_size, bidirectional=True, batch_first=True)
 
-        self.sememe_embedding = nn.Embedding(config.num_sememe, config.sememe_emb_size)
-        self.sememe_lstm = nn.LSTM(config.sememe_emb_size, config.sememe_emb_size, bidirectional=True, batch_first=True)
+        self.linear = nn.Linear(hidden_size_low * 4, output_size - 1)
+        self.linear_1 = nn.Linear(config.hidden_size * 2, hidden_size_low)
 
-        self.gcn = GCN(hidden_size_low,hidden_size_low,self.dropout)
-        
-        char_dict = {'char_vocab_size':config.vocab_size, 'char_dims':config.hidden_size, 'out_channels':config.hidden_size, 'kernel_sizes':[3,4,5], 'embedding':config.embedding}
-        self.word_char_encoder = WordCharEncoder(word_vocab_size=config.vocab_size, word_dims=config.hidden_size, char_emb_kwargs=char_dict, embedding=config.embedding)
-        self.encoder = BiLSTMEncoder(word_encoder_size=config.hidden_size * 2, hidden_size=config.hidden_size)
+        self.gcn = GCN(hidden_size_low, hidden_size_low, self.dropout)
 
         self.fuse_1 = nn.Linear(hidden_size_low, hidden_size_low, bias=False)
         self.fuse_2 = nn.Linear(hidden_size_low, hidden_size_low)
@@ -104,36 +86,38 @@ class myLSTM(nn.Module):
         return f1
 
     def get_mention_indices(self, outputs):
-        #lstm_out = self.mention_linear(lstm_out)
-        if len(outputs.shape) > 1:
-            outputs = [w.argmax(-1) for w in outputs]
-        bio_dict = {'B': 0, 'I': 1, 'O':2}
-        bio_dict = {v:k for k, v in bio_dict.items()}
-        outputs = [outputs]
+        # lstm_out = self.mention_linear(lstm_out)
+        if len(outputs.shape) > 2:
+            outputs = outputs.argmax(-1)
+            # outputs = [w.argmax(-1) for w in outputs]
+        bio_dict = {'B': 0, 'I': 1, 'O': 2}
+        bio_dict = {v: k for k, v in bio_dict.items()}
+
         outputs = [[bio_dict[w.item()] for w in out] for out in outputs]
-        #outputs = [bio_dict[w.item()] for w in outputs]
+        # outputs = [bio_dict[w.item()] for w in outputs]
 
         indices = []
         length = 0
         for output in outputs:
+            mention_index = []
             start, end = -1, -1
             for i, out in enumerate(output):
                 index = i + length
                 if out == 'B':
                     if start != -1:
-                        indices.append((start, end))
+                        mention_index.append((start, end))
                     start, end = index, index
                 elif out == 'O':
                     if start != -1:
-                        indices.append((start, end))
+                        mention_index.append((start, end))
                     start, end = -1, -1
                 else:
                     end = index
             if start != -1:
-                indices.append((start, end))
-            length += len(output)
+                mention_index.append((start, end))
+            indices.append(mention_index)
         return indices
-    
+
     def get_mention_emb(self, lstm_out, mention_index):
         mention_emb_list = []
         mention_start, mention_end = zip(*mention_index)
@@ -141,14 +125,13 @@ class myLSTM(nn.Module):
         mention_end = torch.tensor(mention_end).to(self.device)
         mention_emb_list.append(lstm_out.index_select(0, mention_start))
         mention_emb_list.append(lstm_out.index_select(0, mention_end))
-        
         mention_emb = torch.cat(mention_emb_list, 1)
         return mention_emb
 
     def get_mention_labels(self, predict_indices, gold_sets):
 
         mention_matrix = torch.zeros(len(predict_indices), len(predict_indices)).long().to(self.device)
-        indices_dict = {w : i for i, w in enumerate(predict_indices)}
+        indices_dict = {w: i for i, w in enumerate(predict_indices)}
         for i in range(len(predict_indices)):
             mention_matrix[i, i] = 1
             pass
@@ -163,7 +146,7 @@ class myLSTM(nn.Module):
                     mention_matrix[s1, s2] = 1
                     mention_matrix[s2, s1] = 1
         return mention_matrix
-    
+
     def get_mask(self, lengths):
         tmp = lengths.cpu()
         return torch.arange(max(tmp))[None, :] < tmp[:, None]
@@ -179,7 +162,6 @@ class myLSTM(nn.Module):
         if len(mention_label.shape) == 3:
             predict_indices = [tuple(w) for w in predict_indices]
 
-
         cluster = dict()
 
         for i in range(len(mention_label)):
@@ -190,10 +172,6 @@ class myLSTM(nn.Module):
                     if predict_indices[i] in cluster[predict_indices[j]]:
                         continue
                     cluster[predict_indices[j]].add(predict_indices[i])
-
-
-
-        pass
 
     def refind_gold(self, input_ids, gold_indices, input_masks, mention_label):
         print("gold", mention_label)
@@ -213,11 +191,11 @@ class myLSTM(nn.Module):
         input_ids = input_ids[nomask]
 
         result_html = pkl.load(open('result_html/res.pkl', 'rb'))
-        #word_dict = pkl.load(open('../data/preprocessed/scripts/word_dict.pkl', 'rb'))
+        # word_dict = pkl.load(open('../data/preprocessed/scripts/word_dict.pkl', 'rb'))
         res = []
         res = input_ids.tolist()
         res = self.tokenizer.convert_ids_to_tokens(res)
-        #clusters = mention_label
+        # clusters = mention_label
         clusters = [gold_indices]
 
         i, j = 0, 0
@@ -227,7 +205,7 @@ class myLSTM(nn.Module):
 
         result_text = '<p>'
         for index, cluster in enumerate(clusters):
-            i,j = 0, 0
+            i, j = 0, 0
             predict_indices = cluster
             while i < len(res) and j < len(predict_indices):
                 if i < predict_indices[j][0]:
@@ -253,12 +231,13 @@ class myLSTM(nn.Module):
         open('result_html/res_gold.html', 'w').write(result_html)
         print("input...")
         a = input()
+
     def refind(self, input_ids, predict_indices, input_masks, gold='no'):
         nomask = []
         sms = 0
         for i in range(len(input_masks)):
             sm = sum(input_masks[i])
-            nomask += [j + sms for j in range(sm)]
+            nomask += [j + sms for j in range(sm)][1:-1]
             sms += sm
 
         input_ids = input_ids.reshape(-1)
@@ -266,15 +245,12 @@ class myLSTM(nn.Module):
         input_ids = input_ids[nomask]
 
         result_html = pkl.load(open('res.pkl', 'rb'))
-        #word_dict = pkl.load(open('../data/preprocessed/scripts/word_dict.pkl', 'rb'))
+        # word_dict = pkl.load(open('../data/preprocessed/scripts/word_dict.pkl', 'rb'))
         res = []
         res = input_ids.tolist()
+        res = self.tokenizer.convert_ids_to_tokens(res)
 
-        d = {w:i for i,w in self.dict.items()}
-        res = [d[i] for i in res]
-        #res = self.tokenizer.convert_ids_to_tokens(res)
-
-        #clusters = get_cluster(predict_indices, mention_label)
+        # clusters = get_cluster(predict_indices, mention_label)
         clusters = predict_indices
 
         i, j = 0, 0
@@ -283,7 +259,7 @@ class myLSTM(nn.Module):
 
         result_text = '<p>'
         for index, cluster in enumerate(clusters):
-            i,j = 0, 0
+            i, j = 0, 0
             predict_indices = cluster
             while i < len(res) and j < len(predict_indices):
                 if i < predict_indices[j][0]:
@@ -305,7 +281,7 @@ class myLSTM(nn.Module):
             result_text += '</p>'
             result_text += '<p></p><p>'
         result_text += '</p>'
-        #result_text = result_text.replace('p>', 'h4>')
+        # result_text = result_text.replace('p>', 'h4>')
         if gold == 'g':
             a = str(open('res/{}.html'.format(self.valid_index), 'r').read())
             a = a.replace('ggg', '{}').format(result_text)
@@ -319,17 +295,17 @@ class myLSTM(nn.Module):
 
     def check(self, input_ids, lengths, gold_mention):
         word_dict = pkl.load(open('../data/preprocessed/scripts/word_dict.pkl', 'rb'))
-        word_dict = {v:w for w, v in word_dict.items()}
+        word_dict = {v: w for w, v in word_dict.items()}
         res = []
         for input_id, length in zip(input_ids, lengths):
             tmp = input_id[:length].cpu().tolist()
             print(tmp)
             tmp = self.tokenizer.convert_ids_to_tokens(tmp)
-            res+= tmp
+            res += tmp
         print(res)
         gold_mention = [w for line in gold_mention for w in line]
         for ment in gold_mention:
-            print(''.join(res[ment[0]:ment[1]+1]))
+            print(''.join(res[ment[0]:ment[1] + 1]))
             print('input..')
 
     def get_f1_by_bio(self, predict_bio, gold_bio):
@@ -342,12 +318,11 @@ class myLSTM(nn.Module):
         i = 0
         while start < outputs.shape[0]:
             if lengths[i] > 2:
-                out.append(outputs[start+1:start + lengths[i]-1])
+                out.append(outputs[start + 1:start + lengths[i] - 1])
             start += lengths[i]
             i += 1
         return out
 
-    
     def get_hownet_mask(self, lengths):
         # 20, 512, 30
         max_num = max([max(w) for w in lengths.cpu().tolist()])
@@ -356,193 +331,133 @@ class myLSTM(nn.Module):
             tmp = length.cpu()
             tmp = torch.arange(max_num)[None, :] < tmp[:, None]
             res.append(tmp.float())
-            #res.append(tmp)
-            #res.append(torch.stack(res0, 0))
+            # res.append(tmp)
+            # res.append(torch.stack(res0, 0))
         res = torch.stack(res, 0).to(self.device)
         return res
 
-    def get_maskx(self, input_lengths):
-        max_length = max(input_lengths)
-        masks = torch.zeros([len(input_lengths, max_length)]).to(device=self.device)
-        for i, w in enumerate(input_lengths):
-            masks[i, :w] = 1
-        return masks
+    def get_dense_mention(self, output: torch.Tensor, sentence_counts, input_lengths, input_labels, input_ids):
+        input_res, label_res = [], []
+        cumulative, current_sent_id = -1, 0
+        cur_input, cur_label = [], []
+        input_id_res = []
+        cur_id = []
 
-    def forward(self, input_ids, input_id_chars, input_lenghts, input_labels, mention_sets, reverse_order, input_sememes, input_sememes_nums, show_res=False, coref_evaluator=None):
-        mention_sets = [[(p[0][0].item(), p[1][0].item()) for p in k] for k in mention_sets if len(k) > 0]
-        #encoder_inputs = self.word_char_encoder(input_ids, input_id_chars)
-        encoder_inputs = self.embedding(input_ids)
-        input = nn.utils.rnn.pack_padded_sequence(encoder_inputs, input_lenghts, batch_first=True)
-        output, _= self.lstm(input)
+        for i in range(output.shape[0]):
+            length = input_lengths[i]
+            line = output[i][:length]
+            cur_input.append(line)
+            cur_label.append(input_labels[i][:length])
+            cur_id.append(input_ids[i][:length])
+            if i == sentence_counts[current_sent_id] + cumulative or i == output.shape[0] - 1:
+                cumulative += sentence_counts[current_sent_id]
+                current_sent_id += 1
+                input_res.append(torch.cat(cur_input, 0))
+                label_res.append(torch.cat(cur_label, 0))
+                input_id_res.append(torch.cat(cur_id, 0))
+                cur_input, cur_label = [], []
+                cur_id = []
+        document_lengths = sentence_counts.new_zeros(sentence_counts.shape[0])
+        for i, w in enumerate(input_res):
+            document_lengths[i] = w.shape[0]
+
+        max_lengths = document_lengths.max().item()
+        batch_input = output.new_zeros([sentence_counts.shape[0], max_lengths, output.shape[-1]])
+
+        dense_mask = sentence_counts.new_zeros([document_lengths.shape[0], max_lengths])
+        batch_label = output.new_zeros([sentence_counts.shape[0], max_lengths])
+        batch_idx = sentence_counts.new_zeros([document_lengths.shape[0], max_lengths])
+        for i, w in enumerate(input_res):
+            batch_input[i][:w.shape[0]] = w
+            batch_label[i][:w.shape[0]] = label_res[i]
+            dense_mask[i][:w.shape[0]] = 1
+            batch_idx[i][:w.shape[0]] = input_id_res[i]
+
+        dense_mask = dense_mask.reshape(-1, )
+        return batch_input, batch_label.long(), document_lengths, dense_mask, batch_idx
+
+    def flatten_batch_output(self, input, input_lengths):
+        input = [w for line in input for w in line]
+        return input
+
+    def forward(self, input_ids, input_lengths, input_labels, mention_sets, sentence_counts, reverse_sort,
+                show_res=False, coref_evaluator=None):
+        # mention_sets = [[(p[0][0].item(), p[1][0].item()) for p in k] for k in mention_sets if len(k) > 0]
+        mention_sets = [[k for k in mention_set if len(k) > 0] for mention_set in mention_sets]
+
+        input_embedding = self.embedding(input_ids)
+        paded = nn.utils.rnn.pack_padded_sequence(input_embedding, input_lengths, batch_first=True)
+        output, _ = self.lstm(paded)
         output, _ = nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
-        output = output[reverse_order]
-        input_lenghts = input_lenghts[reverse_order]
+
+        output = output[reverse_sort]
+        input_ids = input_ids[reverse_sort]
+        input_lengths = input_lengths[reverse_sort]
 
         output = self.dropout(output)
-        criterion0 = nn.CrossEntropyLoss(weight=torch.tensor([5, 3, 1.0]).to(self.device))
+        criterion = nn.CrossEntropyLoss(reduction='none')
         output = self.linear_1(output)
-        masks = self.get_mask(input_lenghts)
+        dense_input, dense_labels, document_lengths, dense_mask, batch_idx = self.get_dense_mention(output,
+                                                                                                    sentence_counts,
+                                                                                                    input_lengths,
+                                                                                                    input_labels,
+                                                                                                    input_ids)
 
-        flatten_output = output.reshape([-1, output.shape[-1]])
-        flatten_output_nomask = self.get_mention_nomask(flatten_output, masks)
-        labels = input_labels.reshape(-1)
-        labels = self.get_mention_nomask(labels, masks)
-        length = flatten_output_nomask.shape[0]
-
-        sememe_emb = self.sememe_embedding(input_sememes)[0]
-        sememe_emb = self.dropout(sememe_emb)
-
-        #all_repre = torch.cat((flatten_output_nomask, sememe_emb), 0)
-        #all_repre = self.gcn(all_repre, input_sememes_nums.float())
-        #fusion
-        #fusion = self.fuse_1(all_repre[:length]) + self.fuse_2(flatten_output_nomask)
-        #flatten_output_nomask = (1-fusion) * flatten_output_nomask + fusion * all_repre[:length]
-        #flatten_outpu#t_nomask = self.dropout(flatten_output_nomask)
-        fusion = flatten_output_nomask
-        #flatten_output_nomask = self.dropout(flatten_output_nomask)
-        #flatten_output_nomask = torch.cat((all_repre[:length], flatten_output_nomask),-1)
-        # B,B2, 100
-
-        #fusion = flatten_output_nomask
-        #flatten_output_nomask = self.dropout(flatten_output_nomask)
-
-        predict_output = self.mention_linear_no_pos(flatten_output_nomask)
-
-        losses = criterion0(predict_output, labels)
+        predict_output = self.mention_linear_no_pos(dense_input)
+        t = dense_labels.reshape(-1, )
+        p = predict_output.reshape([-1, predict_output.shape[-1]])
+        # losses = criterion(predict_output.reshape([-1, predict_output.shape[-1]]), dense_labels.reshape(-1, ))
+        losses = (criterion(predict_output.reshape([-1, predict_output.shape[-1]]),
+                            dense_labels.reshape(-1, )) * dense_mask).mean()
 
         predict_indices = self.get_mention_indices(predict_output)
-        gold_indices = self.get_mention_indices(labels)
-        if len(predict_indices) == 0:
-            predict_indices = gold_indices[:1]
-        #predict_indices = gold_indices
-        #predict_indices = gold_indices
+        gold_indices = self.get_mention_indices(dense_labels)
+        for i in range(len(predict_indices)):
+            if len(predict_indices[i]) == 0:
+                predict_indices[i] = gold_indices[i][:1]
+        # predict_indices = gold_indices
+        criterion = nn.CrossEntropyLoss()
+        total_count, correct_counts = [], []
+        self.cluster = []
+        for i in range(dense_input.shape[0]):
+            mention_emb = self.get_mention_emb(dense_input[i], predict_indices[i])
+            mention_label = self.get_mention_labels(predict_indices[i], mention_sets[i])
 
-        mention_emb = self.get_mention_emb(flatten_output_nomask, predict_indices)
-        mention_label = self.get_mention_labels(predict_indices, mention_sets)
+            mention_emb_r = mention_emb.unsqueeze(1)
+            mention_emb_c = mention_emb.unsqueeze(0)
 
-        mention_emb_r = mention_emb.unsqueeze(1)
-        mention_emb_c = mention_emb.unsqueeze(0)
+            mention_emb_agg = torch.cat((mention_emb_c * mention_emb_r, mention_emb_r + mention_emb_c), -1)
 
-        mention_emb_agg = torch.cat((mention_emb_c * mention_emb_r, mention_emb_r + mention_emb_c), -1)
+            mention_interaction = self.linear(mention_emb_agg)
+            correct_count, count = 0, 0
+            new_mention_interaction, new_mention_label = [], []
+            for j in range(mention_interaction.shape[0]):
+                new_mention_interaction.append(mention_interaction[j, :j + 1])
+                new_mention_label.append(mention_label[j, :j + 1])
+            new_mention_label = torch.cat(new_mention_label)
+            new_mention_interaction = torch.cat(new_mention_interaction, 0)
+            tmp_loss = criterion(new_mention_interaction, new_mention_label)
+            # losses += tmp_loss
 
-        mention_interaction = self.linear(mention_emb_agg)
-        correct_count, count = 0, 0
-        new_mention_interaction, new_mention_label = [], []
-        for i in range(mention_interaction.shape[0]):
-            new_mention_interaction.append(mention_interaction[i, :i + 1])
-            new_mention_label.append(mention_label[i, :i + 1])
-        new_mention_label = torch.cat(new_mention_label)
-        new_mention_interaction = torch.cat(new_mention_interaction, 0)
-        criterion1 = nn.CrossEntropyLoss()
-        tmp_loss = criterion1(new_mention_interaction, new_mention_label)
-        losses += tmp_loss
+            self.predict_mention = new_mention_interaction.cpu().tolist()
+            self.gold_mention = new_mention_label.cpu().tolist()
 
-        self.predict_mention = new_mention_interaction.cpu().tolist()
-        self.gold_mention = new_mention_label.cpu().tolist()
+            pred_cluster, gold_cluster = evaluate_coref(predict_indices[i], mention_interaction, mention_sets[i],
+                                                        coref_evaluator)
+            self.cluster.append((pred_cluster, gold_cluster))
+            correct_counts.append(correct_count)
+            total_count.append(count)
 
-        pred_cluster, gold_cluster = evaluate_coref(predict_indices, mention_interaction, mention_sets, coref_evaluator)
-        new_x = CorefEvaluator()
-        evaluate_coref(predict_indices, mention_interaction, mention_sets, new_x)
-        tmp_prf = new_x.get_prf()
-        self.single_prf = (gold_cluster,tmp_prf)
+        # predict_output = self.flatten_batch_output(predict_output, document_lengths)
+        # dense_labels = self.flatten_batch_output(dense_labels, document_lengths)
+        # refind_entity(batch_idx, dense_labels, self.word_dict)
 
-        #predict_indices = self.get_mention_indices(torch.argmax(predict_output, -1))
-        #gold_indices = [w for line in mention_sets for w in line]
-        res = (mention_interaction.cpu().tolist(), predict_indices, fusion.cpu().tolist())
-        pkl.dump(res, open('ok.pkl', 'wb'))
+        return losses, correct_counts, total_count, predict_output, dense_labels, document_lengths
+        tmp_prf = coref_evaluator.get_prf()
+
         self.cluster = (pred_cluster, gold_cluster)
 
-        self.refind(input_ids, pred_cluster, masks)
-        self.refind(input_ids, gold_cluster, masks, 'g')
-
         return losses, correct_count, count, predict_output, labels, new_mention_interaction.cpu().tolist(), new_mention_label.cpu().tolist()
-
-        return losses, correct_count, count, predict_output, labels, new_mention_interaction.cpu().tolist(), new_mention_label.cpu().tolist()
-
-
-    def forwardx(self, input_ids, input_masks, input_segments, input_labels, mention_sets, input_poses, input_sememes, input_sememes_nums, use_pos='pos', show_res=False, coref_evaluator=None):
-        mention_sets = [[(p[0][0].item(), p[1][0].item()) for p in k] for k in mention_sets if len(k) > 0]
-
-        output = self.bert(input_ids, token_type_ids=input_segments, attention_mask=input_masks)[0]
-        output = self.dropout(output)
-        criterion = nn.CrossEntropyLoss()
-        output = self.linear_1(output)
-
-        from copy import deepcopy
-        masks = deepcopy(input_masks)
-        masks[:, 0] = 0
-        for i in range(masks.shape[0]):
-            assert masks[i, sum(masks[i])] == 1
-            masks[i, sum(masks[i])] = 0
-
-        flatten_output = output.reshape([-1, output.shape[-1]])
-        flatten_output_nomask = self.get_mention_nomask(flatten_output, masks)
-        labels = input_labels.reshape(-1)
-        labels = self.get_mention_nomask(labels, masks)
-        length = flatten_output_nomask.shape[0]
-
-        sememe_emb = self.sememe_embedding(input_sememes)[0]
-        sememe_emb = self.dropout(sememe_emb)
-
-        all_repre = torch.cat((flatten_output_nomask, sememe_emb), 0)
-        all_repre = self.gcn(all_repre, input_sememes_nums.float())
-        #fusion 
-        fusion = self.fuse_1(all_repre[:length]) + self.fuse_2(flatten_output_nomask)
-        flatten_output_nomask = (1-fusion) * flatten_output_nomask + fusion * all_repre[:length]
-        flatten_output_nomask = self.dropout(flatten_output_nomask)
-        #flatten_output_nomask = torch.cat((all_repre[:length], flatten_output_nomask),-1)
-        # B,B2, 100
-
-
-        predict_output = self.mention_linear_no_pos(flatten_output_nomask)
-
-        losses = criterion(predict_output, labels)
-
-        predict_indices = self.get_mention_indices(predict_output)
-        gold_indices = self.get_mention_indices(labels)
-        if len(predict_indices) == 0:
-            predict_indices = gold_indices[:1]
-        #predict_indices = gold_indices
-
-        mention_emb = self.get_mention_emb(flatten_output_nomask, predict_indices)
-        mention_label = self.get_mention_labels(predict_indices, mention_sets)
-
-        mention_emb_r = mention_emb.unsqueeze(1)
-        mention_emb_c = mention_emb.unsqueeze(0)
-
-        mention_emb_agg = torch.cat((mention_emb_c * mention_emb_r, mention_emb_r + mention_emb_c), -1)
-
-        mention_interaction = self.linear(mention_emb_agg)
-        correct_count, count = 0, 0
-        new_mention_interaction, new_mention_label = [], []
-        for i in range(mention_interaction.shape[0]):
-            new_mention_interaction.append(mention_interaction[i, :i + 1])
-            new_mention_label.append(mention_label[i, :i + 1])
-        new_mention_label = torch.cat(new_mention_label)
-        new_mention_interaction = torch.cat(new_mention_interaction, 0)
-        criterion = nn.CrossEntropyLoss()
-        tmp_loss = criterion(new_mention_interaction, new_mention_label)
-        losses += tmp_loss
-
-        self.predict_mention = new_mention_interaction.cpu().tolist()
-        self.gold_mention = new_mention_label.cpu().tolist()
-
-        pred_cluster, gold_cluster = evaluate_coref(predict_indices, mention_interaction, mention_sets, coref_evaluator)
-        new_x = CorefEvaluator()
-        evaluate_coref(predict_indices, mention_interaction, mention_sets, new_x)
-        tmp_prf = new_x.get_prf()
-        self.single_prf = (gold_cluster,tmp_prf)
-
-        #predict_indices = self.get_mention_indices(torch.argmax(predict_output, -1))
-        #gold_indices = [w for line in mention_sets for w in line]
-        res = (mention_interaction.cpu().tolist(), predict_indices, fusion.cpu().tolist())
-        pkl.dump(res, open('ok.pkl', 'wb'))
-
-        self.refind(input_ids, pred_cluster, input_masks)
-        self.refind(input_ids, gold_cluster, input_masks, 'g')
-        self.cluster = (pred_cluster, gold_cluster)
-
-        return losses, correct_count, count, predict_output,labels, new_mention_interaction.cpu().tolist(), new_mention_label.cpu().tolist()
 
 
 class GraphConvolution(nn.Module):
@@ -569,7 +484,7 @@ class GraphConvolution(nn.Module):
 
     def forward(self, input, adj):
         support = torch.mm(input, self.weight)
-        #output = torch.spmm(adj, support)
+        # output = torch.spmm(adj, support)
         output = torch.spmm(adj, support)
         if self.bias is not None:
             return output + self.bias
@@ -581,6 +496,7 @@ class GraphConvolution(nn.Module):
                + str(self.in_features) + ' -> ' \
                + str(self.out_features) + ')'
 
+
 class GCN(nn.Module):
     def __init__(self, nfeat, nhid, dropout):
         super(GCN, self).__init__()
@@ -588,16 +504,16 @@ class GCN(nn.Module):
         self.gc1 = GraphConvolution(nfeat, nhid)
         self.gc2 = GraphConvolution(nhid, nhid)
         self.gc3 = GraphConvolution(nhid, nhid)
-        self.gc4 =GraphConvolution(nhid, nhid)
+        self.gc4 = GraphConvolution(nhid, nhid)
         self.dropout = dropout
 
     def forward(self, x, adj):
-        #x = self.dropout(x)
+        # x = self.dropout(x)
         x = torch.relu(self.gc1(x, adj))
+        # x = self.dropout(x)
+        # x = torch.relu(self.gc2(x, adj))
         x = self.dropout(x)
-        #x = torch.relu(self.gc2(x, adj))
-        #x = self.dropout(x)
-        #x = self.gc3(x, adj)
-        #x = self.gc2(x, adj)
+        # x = self.gc3(x, adj)
+        # x = self.gc2(x, adj)
         return x
         return torch.log_softmax(x, dim=1)

@@ -30,3 +30,4 @@ max_seq_length: 128
 min_freq: 1
 pos_emb_size: 10
 sememe_emb_size: 100
+num_labels: 2

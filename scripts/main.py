@@ -7,11 +7,11 @@ import sys
 import json
 from tqdm import tqdm
 import torch
-import yaml
 from pytorch_transformers.optimization import AdamW, WarmupLinearSchedule
 from pytorch_transformers.modeling_bert import BertConfig
 import torch.nn as nn
 from sklearn.metrics import f1_score
+import yaml
 import pickle as pkl
 
 from utils import MyDataLoader
@@ -20,13 +20,6 @@ from metrics_back import CorefEvaluator
 from utils import get_f1_by_bio_nomask
 from utils import get_mention_f1
 
-try:
-    from apex import amp
-except:
-    pass
-
-
-#device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 import random
 import numpy as np
 
@@ -44,11 +37,8 @@ class Pipeline:
         basename = os.path.basename(os.getcwd())
         with open('config.yaml') as f:
             config = yaml.load(f, Loader=yaml.FullLoader)
-        for w, z in config.items():
-            self.__setattr__(w, z)
-        if args.test_mode == 'test':
-            #self.patience = 10
-            pass
+        for cfg in config:
+            self.__setattr__(cfg, config[cfg])
         self.data_dir = self.data_dir.format(basename)
         self.target_dir = self.target_dir.format(basename)
         if not os.path.exists(self.target_dir):
@@ -60,9 +50,8 @@ class Pipeline:
         else:
             self.model.eval()
 
-        path = os.path.join(self.target_dir, 'best_26.pth.tar')
-        self.model.load_state_dict(torch.load(path)['model'])
-
+        #path = os.path.join(self.target_dir, 'best_20.pth.tar')
+        #self.model.load_state_dict(torch.load(path)['model'])
         dataloader = self.validLoader
         if training:
             dataloader = self.trainLoader
@@ -72,80 +61,64 @@ class Pipeline:
         dataiter = tqdm(dataloader, total=dataloader.__len__(), file=sys.stdout)
         bio_predict, bio_gold, mention_predict, mention_gold = [], [], [], []
         sx, f1s, losses, fusion_matrix = [], [], [], []
-        score_1 = []
         coref_evaluator = CorefEvaluator()
         detail_prf = []
+        rate_res = []
         cluster_res = []
 
         for index, data in enumerate(dataiter):
             self.model.valid_index = index
             #print('mention', data['mention_sets'])
-            input_ids = data['input_ids'][0].to(self.device)
-            input_id_chars = data['input_id_chars'][0].to(self.device)
-            input_lengths = data['input_lengths'][0].to(self.device)
-            input_labels = data['input_labels'][0].to(self.device)
-            input_sememes = data['input_sememes'].to(self.device)
-            input_sememes_nums = data['input_sememes_nums'][0].to(self.device)
+            input_ids = data['input_ids'].to(self.device)
+            input_lengths = data['input_lengths'].to(self.device)
+            input_labels = data['input_labels'].to(self.device)
+            reverse_orders = data['reverse_orders'].to(self.device)
+            sentence_counts = data['sentence_counts'].to(self.device)
             mention_sets = data['mention_sets']
-            reverse_order = data['reverse_orders'][0].to(self.device)
 
-            use_pos = self.args.use_pos
             if training:
-                loss, correct_count, count, bio_p, bio_g, mention_p, mention_g = self.model(input_ids,
-                                                                                            input_id_chars,
-                                                                                            input_lengths,
-                                                                                            input_labels,
-                                                                                            mention_sets,
-                                                                                            reverse_order,
-                                                                                            input_sememes,
-                                                                                            input_sememes_nums,
-                                                                                            False, coref_evaluator)
-                if self.fp16 == 'use':
-                    with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                        scaled_loss.backward()
-                    nn.utils.clip_grad_norm(amp.master_params(self.optimizer), self.max_grad_norm)
-                else:
-                    loss.backward()
-                    nn.utils.clip_grad_norm(self.model.parameters(), self.max_grad_norm)
-                self.scheduler.step()
+                loss, correct_count, count, bio_p, bio_g, doc_len = self.model(input_ids, input_lengths, input_labels, mention_sets, sentence_counts, reverse_orders, False, coref_evaluator)
+                loss.backward()
+                nn.utils.clip_grad_norm(self.model.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 self.model.zero_grad()
             else:
                 with torch.no_grad():
-                    loss, correct_count, count, bio_p, bio_g, mention_p, mention_g = \
-                        self.model(input_ids, input_id_chars, input_lengths,
-                                   input_labels, mention_sets, reverse_order, input_sememes, input_sememes_nums,
-                                   show_res=True, coref_evaluator=coref_evaluator)
+                    loss, correct_count, count, bio_p, bio_g, doc_len = self.model(input_ids, input_lengths, input_labels,
+                                                                          mention_sets, sentence_counts, reverse_sort,
+                                                                          False, coref_evaluator)
             bio_predict.append(bio_p)
             bio_gold.append(bio_g)
             # p1, r1, f1 = get_f1_by_bio_nomask(bio_p, bio_g)
 
             # p2, r2, f2 = get_mention_f1(mention_p, mention_g)
 
-            f1, fusion = get_f1_by_bio_nomask(bio_p, bio_g)
-            score_1.append(f1)
-            fusion_matrix.append(fusion)
-            f1s.append(f1)
+            for single_bio_p, single_bio_g, d_l in zip(bio_p, bio_g, doc_len):
+                f1, fusion = get_f1_by_bio_nomask(single_bio_p[:d_l], single_bio_g[:d_l])
+                fusion_matrix.append(fusion)
+                f1s.append(f1)
             losses.append(loss.item())
             prf = coref_evaluator.get_prf()
             sub_score = coref_evaluator.get_sub_score()
-            cluster_res.append(self.model.cluster)
 
             description = "Epoch {},loss:{:.3f}, label bio f1:{:.3f}".format(self.global_epcoh, np.mean(losses),
                                                                              np.mean(f1s, 0)[-1])
             description = "Epoch {},loss:{:.3f}, label bio f1:{:.3f}, mean: p {:.4f}, r {:.4f}, f {:.4f}".format(
-                self.global_epcoh, np.mean(losses), np.mean(score_1, 0)[-1], *prf)
+                self.global_epcoh, np.mean(losses), np.mean(f1s, 0)[-1], *prf)
 
             dataiter.set_description(description)
-            detail_prf.append(self.model.single_prf)
+            #detail_prf.append(self.model.single_prf)
+            cluster_res += self.model.cluster
         fusion_matrix = np.sum(fusion_matrix, 0)
         p = fusion_matrix[0] / fusion_matrix[1] if fusion_matrix[1] > 0 else 0
         r = fusion_matrix[0] / fusion_matrix[2] if fusion_matrix[2] > 0 else 0
         f = 2 * p * r / (p + r) if p + r > 0 else 0
         res = [(p, r, f), sub_score[0], sub_score[1], sub_score[2], prf]
         coref_evaluator.get_res()
-        pkl.dump(detail_prf, open('detail_prf.pkl', 'wb'))
-        pkl.dump(cluster_res, open('lstm_pipe.pkl', 'wb'))
+        #pkl.dump(detail_prf, open('detail_prf.pkl', 'wb'))
+        #pkl.dump(detail_prf, open('detail_prf.pkl', 'wb'))
+        #pkl.dump(rate_res, open('rate_res.pkl', 'wb'))
+        #pkl.dump(cluster_res, open('bert_hownet_gcn_joint.pkl', 'wb'))
 
         return res
 
@@ -154,13 +127,11 @@ class Pipeline:
         res = []
         for epoch in range(self.epoch_size):
             self.global_epcoh = epoch
-            #self.execute_iter()
-            #res_valid = self.execute_iter(training=False)
+            self.execute_iter()
+            res_valid = self.execute_iter(training=False)
             res_test = self.execute_iter(training=False, test=True)
-            exit(0)
 
 
-            #exit(0)
             res.append((res_valid, res_test))
 
             tmp = sorted(res, key=lambda x: x[0][-1][-1])[::-1]
@@ -200,47 +171,33 @@ class Pipeline:
         self.trainLoader = MyDataLoader(self, mode='train').getdata()
         self.validLoader = MyDataLoader(self, mode='valid').getdata()
         self.testLoader = MyDataLoader(self, mode='test').getdata()
-        #self.testLoader = MyDataLoader(self, mode='final').getdata()
-        
-        word_dict = pkl.load(open(os.path.join(self.data_dir, 'word_dict.pkl'), 'rb'))
-        sememe_dict = pkl.load(open(os.path.join(self.data_dir, 'sememe_dict.pkl'), 'rb'))
-        embedding_matrix = pkl.load(open(os.path.join(self.data_dir, 'emb.pkl'), 'rb'))
-        pos_dict = pkl.load(open(os.path.join(self.data_dir, 'pos_dict.pkl'), 'rb'))
-        config = BertConfig.from_pretrained(self.bert_path, num_labels=3)
-        config.__setattr__('bert_path', self.bert_path)
-        config.__setattr__('num_pos', len(pos_dict))
-        config.__setattr__('pos_emb_size', self.pos_emb_size)
-        config.__setattr__('num_sememe', len(sememe_dict))
-        config.__setattr__('sememe_emb_size', self.sememe_emb_size)
-        config.__setattr__('embedding_size', self.embedding_size)
-        config.__setattr__('embedding', embedding_matrix)
-        config.__setattr__('vocab_size', len(word_dict))
-        config.__setattr__('word_dict', word_dict)
-        #self.model = myLSTM.from_pretrained(self.bert_path, config=config, device=self.device).to(self.device)
-        self.model = myLSTM(config, device=self.device).to(self.device)
+
+        self.word_dict = pkl.load(open(os.path.join(self.data_dir, 'word_dict.pkl'), 'rb'))
+        #embedding_matrix = pkl.load(open(os.path.join(self.data_dir, 'emb.pkl'), 'rb'))
+        self.vocab_size = len(self.word_dict)
+        self.embedding_matrix = pkl.load(open(os.path.join(self.data_dir, 'emb.pkl'), 'rb'))
+        self.model = myLSTM(self, device=self.device).to(self.device)
 
         param_optimizer = list(self.model.named_parameters())
         no_decay = ['bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
-            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 1e-8},
+            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0},
             {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0}
         ]
-        self.optimizer = AdamW(filter(lambda p: p.requires_grad, self.model.parameters()),
-                        lr=self.learning_rate, weight_decay=1e-7)
-                        #eps=self.adam_epsilon, weight_decay=1e-6)
+        self.optimizer = AdamW(self.model.parameters(),
+                        lr=self.learning_rate,
+                        eps=float(self.adam_epsilon), weight_decay=1e-6)
         self.scheduler = WarmupLinearSchedule(self.optimizer, warmup_steps=self.warmup_steps,
                                         t_total=self.epoch_size * self.trainLoader.__len__())
 
 
-        if self.fp16 == 'use':
-            self.model, self.optimizer = amp.initialize(self.model, self.optimizer, opt_level=self.fp16_opt_level)
         self.criterion = nn.CrossEntropyLoss()
         self.forward()
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cuda', default=1)
+    parser.add_argument('--cuda_index', default=1)
     args = parser.parse_args()
-    pipeline = Pipeline(args.cuda)
+    pipeline = Pipeline(args)
     pipeline.main()
